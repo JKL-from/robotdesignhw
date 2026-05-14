@@ -1,11 +1,10 @@
-import json
 import os
+import json
 import time
 import threading
-import tkinter as tk
-from tkinter import ttk, messagebox
 import numpy as np
 
+from flask import Flask, request, jsonify, render_template_string
 from rustypot import Scs0009PyController
 
 
@@ -24,16 +23,22 @@ CloseSpeed = 3
 
 MiddlePos = [3, 0, -5, -8, -2, 5, -12, 0]
 
-# 自然语言解析方式："keyword" = 关键词匹配（默认），"llm" = 大模型 Tool 调用
-DEFAULT_CONTROL_MODE = os.environ.get("HAND_CONTROL_MODE", "llm")
+
+# =========================
+# LLM Config
+# =========================
 
 SILICONFLOW_BASE_URL = os.environ.get(
-    "SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1"
+    "SILICONFLOW_BASE_URL",
+    "https://api.siliconflow.cn/v1"
 )
-LLM_MODEL = os.environ.get("HAND_LLM_MODEL", "Qwen/Qwen3.6-27B")
 
-# 未配置环境时可留空，仅影响「大模型 Tool」模式；测试前可在此临时填写 Key，正式使用建议用环境变量。
-SILICONFLOW_API_KEY_INLINE = "sk-bugukxxjswpmsjvmedophzhsnwprggjhsqburwgorfitdwzq"
+LLM_MODEL = os.environ.get(
+    "HAND_LLM_MODEL",
+    "Qwen/Qwen3.6-27B"
+)
+
+SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY")
 
 
 # =========================
@@ -196,7 +201,7 @@ def Index_Pointing():
 def Nonono():
     Index_Pointing()
 
-    for i in range(3):
+    for _ in range(3):
         time.sleep(0.2)
         Move_Index(-10, 80, MaxSpeed)
 
@@ -239,7 +244,7 @@ def Scissors():
     Victory()
 
     if Side == 1:
-        for i in range(3):
+        for _ in range(3):
             time.sleep(0.2)
             Move_Index(-50, 20, MaxSpeed)
             Move_Middle(-20, 50, MaxSpeed)
@@ -249,7 +254,7 @@ def Scissors():
             Move_Middle(-65, 15, MaxSpeed)
 
     if Side == 2:
-        for i in range(3):
+        for _ in range(3):
             time.sleep(0.2)
             Move_Index(-20, 50, MaxSpeed)
             Move_Middle(-50, 20, MaxSpeed)
@@ -409,44 +414,8 @@ def gesture_sequence():
 
 
 # =========================
-# Natural Language Matching
+# Command Definition
 # =========================
-
-KEYWORD_RULES = [
-    {
-        "command": "box",
-        "keywords": ["box", "盒子", "方盒", "箱子", "拿盒子", "抓盒子"],
-    },
-    {
-        "command": "tissue",
-        "keywords": ["tissue", "纸巾", "抽纸", "餐巾纸", "拿纸", "拿纸巾", "抓纸巾"],
-    },
-    {
-        "command": "bottle",
-        "keywords": ["bottle", "瓶子", "水瓶", "杯子", "拿瓶子", "抓瓶子", "thirsty","渴"],
-    },
-    {
-        "command": "ok",
-        "keywords": ["ok", "OK", "okay", "手势ok", "ok手势", "手势-OK"],
-    },
-    {
-        "command": "rock",
-        "keywords": ["rock", "摇滚", "rock手势", "手势rock", "手势-rock"],
-    },
-    {
-        "command": "gesture",
-        "keywords": ["run", "手势", "全部手势", "所有手势", "做一遍", "演示", "展示"],
-    },
-    {
-        "command": "open",
-        "keywords": ["open", "打开", "张开", "复位", "恢复", "恢复原状", "回到原位"],
-    },
-    {
-        "command": "close",
-        "keywords": ["close", "关闭", "握拳", "握住", "合上"],
-    },
-]
-
 
 COMMAND_DISPLAY_NAME = {
     "box": "box / 盒子",
@@ -459,26 +428,45 @@ COMMAND_DISPLAY_NAME = {
     "close": "close / 握拳",
 }
 
-
-def extract_command(text):
-    text_original = text.strip()
-    text_lower = text_original.lower()
-
-    for rule in KEYWORD_RULES:
-        for keyword in rule["keywords"]:
-            keyword_lower = keyword.lower()
-
-            if keyword_lower in text_lower:
-                return rule["command"], keyword
-
-    return None, None
-
-
-# =========================
-# LLM Tool Calling (SiliconFlow / OpenAI-compatible)
-# =========================
-
 VALID_COMMANDS = frozenset(COMMAND_DISPLAY_NAME.keys())
+
+COMMAND_REPLY = {
+    "box": "好的，我来执行 box 动作。",
+    "tissue": "好的，我来执行 tissue 动作。",
+    "bottle": "好的，我来执行 bottle 动作。",
+    "ok": "好的，我来做 OK 手势。",
+    "rock": "好的，我来做 rock 手势。",
+    "gesture": "好的，我来运行完整手势序列，最后停在 rock。",
+    "open": "好的，已复位到 open。",
+    "close": "好的，我来执行 close 动作。",
+}
+
+
+# =========================
+# Robot Command Execution
+# =========================
+
+robot_lock = threading.Lock()
+
+
+def run_robot_command(command):
+    with robot_lock:
+        if command == "open":
+            move_pose(POSES["open"])
+            return
+
+        if command == "gesture":
+            time.sleep(3)
+            gesture_sequence()
+            return
+
+        time.sleep(3)
+        move_pose(POSES[command])
+
+
+# =========================
+# LLM Tool Calling
+# =========================
 
 HAND_CONTROL_TOOLS = [
     {
@@ -486,7 +474,8 @@ HAND_CONTROL_TOOLS = [
         "function": {
             "name": "execute_hand_command",
             "description": (
-                "根据用户意图执行灵巧手动作。仅在用户明确要控制手型、抓取或演示时使用。"
+                "根据用户自然语言意图选择并执行机器人手动作。"
+                "只有当用户明确要求控制机械手、抓取物体、摆手势、复位或演示时才调用。"
             ),
             "parameters": {
                 "type": "object",
@@ -495,8 +484,15 @@ HAND_CONTROL_TOOLS = [
                         "type": "string",
                         "enum": sorted(VALID_COMMANDS),
                         "description": (
-                            "动作命令：box=盒子抓取；tissue=纸巾；bottle=瓶子；"
-                            "ok/rock=手势；gesture=完整演示组合；open=张开复位；close=握拳"
+                            "动作命令："
+                            "box=抓盒子；"
+                            "tissue=抓纸巾；"
+                            "bottle=抓瓶子；"
+                            "ok=OK手势；"
+                            "rock=摇滚手势；"
+                            "gesture=完整手势演示，最后停在rock；"
+                            "open=张开/复位；"
+                            "close=握拳/闭合。"
                         ),
                     }
                 },
@@ -506,73 +502,118 @@ HAND_CONTROL_TOOLS = [
     }
 ]
 
-LLM_SYSTEM_PROMPT = """你是灵巧手（机器人手）控制助手。用户用自然语言描述动作。
-当用户明确需要执行手部动作时，请调用 execute_hand_command，并选择正确的 command。
-若用户只是闲聊、提问与手部控制无关，不要调用工具，用一两句中文简短回复。
-若意图模糊，可简短追问或说明可选动作。"""
+LLM_SYSTEM_PROMPT = """
+你是 EmbodiedGPT，一个机器人手控制助手。
+
+你需要把用户的自然语言转换成机器人手命令。
+
+可用命令只有：
+1. box：用户想拿盒子、抓盒子、box、container 等。
+2. tissue：用户想拿纸巾、抽纸、napkin、paper、tissue 等。
+3. bottle：用户想拿瓶子、水瓶、bottle、water bottle，或者用户说 thirsty/口渴 等。
+4. ok：用户想做 OK 手势、okay sign。
+5. rock：用户想做 rock 手势、摇滚手势、rock sign。
+6. gesture：用户想运行完整演示、run、show all gestures、展示所有手势。
+7. open：用户想复位、张开、打开、reset、restore、open hand。
+8. close：用户想握拳、闭合、close hand、make a fist。
+
+如果用户明确要求执行动作，必须调用 execute_hand_command。
+如果用户只是聊天、提问、解释问题，与机械手动作无关，不要调用工具，只用简短中文回复。
+如果用户意图不清楚，简短询问用户想执行哪个动作。
+"""
 
 
-def _get_llm_client():
+def get_llm_client():
     try:
         from openai import OpenAI
     except ImportError as e:
-        raise RuntimeError(
-            "未安装 openai 库。使用大模型模式前请执行：pip install openai"
-        ) from e
+        raise RuntimeError("未安装 openai 库，请执行：pip install openai") from e
 
-    key = (
-        (SILICONFLOW_API_KEY_INLINE or "").strip()
-        or os.environ.get("SILICONFLOW_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-    )
-    if not key:
+    if not SILICONFLOW_API_KEY:
         raise RuntimeError(
-            "未设置 API Key：在文件顶部填写 SILICONFLOW_API_KEY_INLINE，"
-            "或配置环境变量 SILICONFLOW_API_KEY / OPENAI_API_KEY"
+            "未设置 SILICONFLOW_API_KEY。请先设置环境变量，例如："
+            'setx SILICONFLOW_API_KEY "你的API_KEY"'
         )
-    return OpenAI(api_key=key, base_url=SILICONFLOW_BASE_URL)
+
+    return OpenAI(
+        api_key=SILICONFLOW_API_KEY,
+        base_url=SILICONFLOW_BASE_URL,
+    )
 
 
-def _assistant_message_to_dict(msg):
-    d = {"role": "assistant", "content": msg.content}
+def assistant_message_to_dict(msg):
+    result = {
+        "role": "assistant",
+        "content": msg.content,
+    }
+
     if getattr(msg, "tool_calls", None):
-        d["tool_calls"] = [
+        result["tool_calls"] = [
             {
-                "id": tc.id,
+                "id": tool_call.id,
                 "type": "function",
                 "function": {
-                    "name": tc.function.name,
-                    "arguments": tc.function.arguments,
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
                 },
             }
-            for tc in msg.tool_calls
+            for tool_call in msg.tool_calls
         ]
-    return d
+
+    return result
 
 
-def _dispatch_hand_tool(function_name, arguments_json):
+def dispatch_hand_tool(function_name, arguments_json):
     if function_name != "execute_hand_command":
-        return f"未知工具：{function_name}"
+        return {
+            "ok": False,
+            "message": f"未知工具：{function_name}",
+            "command": None,
+        }
+
     try:
         args = json.loads(arguments_json) if arguments_json else {}
     except json.JSONDecodeError as e:
-        return f"参数 JSON 无效：{e}"
-    cmd = args.get("command")
-    if cmd not in VALID_COMMANDS:
-        return f"无效 command：{cmd!r}，允许值：{', '.join(sorted(VALID_COMMANDS))}"
-    execute_command(cmd)
-    return f"已执行：{COMMAND_DISPLAY_NAME[cmd]}"
+        return {
+            "ok": False,
+            "message": f"工具参数不是有效 JSON：{e}",
+            "command": None,
+        }
+
+    command = args.get("command")
+
+    if command not in VALID_COMMANDS:
+        return {
+            "ok": False,
+            "message": f"无效命令：{command}",
+            "command": None,
+        }
+
+    run_robot_command(command)
+
+    return {
+        "ok": True,
+        "message": f"已执行：{COMMAND_DISPLAY_NAME[command]}",
+        "command": command,
+    }
 
 
 def run_llm_control(user_text):
-    """在后台线程中调用；通过 execute_command 驱动真实动作。"""
-    client = _get_llm_client()
+    client = get_llm_client()
+
     messages = [
-        {"role": "system", "content": LLM_SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
+        {
+            "role": "system",
+            "content": LLM_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": user_text,
+        },
     ]
-    tool_log = []
-    max_rounds = 8
+
+    executed_commands = []
+    max_rounds = 4
 
     for _ in range(max_rounds):
         response = client.chat.completions.create(
@@ -584,282 +625,516 @@ def run_llm_control(user_text):
             tools=HAND_CONTROL_TOOLS,
             tool_choice="auto",
         )
+
         msg = response.choices[0].message
+
         if not getattr(msg, "tool_calls", None):
-            return msg.content or "（模型无文字回复）", tool_log
+            return {
+                "reply": msg.content or "我没有执行动作。",
+                "commands": executed_commands,
+            }
 
-        messages.append(_assistant_message_to_dict(msg))
+        messages.append(assistant_message_to_dict(msg))
 
-        for tc in msg.tool_calls:
-            name = tc.function.name
-            raw_args = tc.function.arguments or "{}"
-            out = _dispatch_hand_tool(name, raw_args)
-            tool_log.append(f"{name}({raw_args}) -> {out}")
-            messages.append(
-                {"role": "tool", "content": str(out), "tool_call_id": tc.id}
+        for tool_call in msg.tool_calls:
+            tool_result = dispatch_hand_tool(
+                tool_call.function.name,
+                tool_call.function.arguments or "{}",
             )
 
-    return "已达到对话轮数上限，请简化指令。", tool_log
+            if tool_result["command"]:
+                executed_commands.append(tool_result["command"])
 
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result["message"],
+                }
+            )
 
-def on_send_llm_worker(user_text):
-    try:
-        root.after(0, lambda: set_status("正在请求大模型…"))
-        reply, tool_log = run_llm_control(user_text)
-        log_text = " | ".join(tool_log) if tool_log else "（未调用工具）"
-        matched_line = (
-            f"大模型：{reply[:120]}{'…' if len(reply) > 120 else ''}    "
-            f"工具：{log_text[:200]}{'…' if len(log_text) > 200 else ''}"
-        )
-        root.after(0, lambda s=matched_line: matched_var.set(s))
-        root.after(
-            0,
-            lambda r=reply: set_status(
-                r[:200] + ("…" if len(r) > 200 else "")
-            ),
-        )
-    except Exception as e:
-        err = str(e)
-        root.after(
-            0,
-            lambda msg=err: messagebox.showerror("大模型调用失败", msg),
-        )
-        root.after(0, lambda: set_status("大模型调用失败。"))
+        if executed_commands:
+            command = executed_commands[-1]
+            return {
+                "reply": COMMAND_REPLY.get(command, "动作已完成。"),
+                "commands": executed_commands,
+            }
+
+    return {
+        "reply": "我没有成功确定要执行的动作，请换一种说法。",
+        "commands": executed_commands,
+    }
 
 
 # =========================
-# UI Command Execution
+# Flask Web App
 # =========================
 
-is_running = False
-run_lock = threading.Lock()
+app = Flask(__name__)
+
+HTML_PAGE = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EmbodiedGPT</title>
+    <style>
+        :root {
+            --bg: #212121;
+            --panel: #2f2f2f;
+            --panel-light: #3a3a3a;
+            --text: #f5f5f5;
+            --muted: #b4b4b4;
+            --border: #454545;
+            --accent: #10a37f;
+            --accent-hover: #0d8f70;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            height: 58px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 21px;
+            font-weight: 700;
+        }
+
+        #status {
+            position: fixed;
+            top: 70px;
+            right: 18px;
+            color: var(--muted);
+            font-size: 13px;
+            background: rgba(47,47,47,0.9);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 8px 12px;
+            z-index: 10;
+        }
+
+        #chat {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 0 150px;
+        }
+
+        .message {
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            padding: 14px 16px;
+        }
+
+        .message-inner {
+            width: min(820px, 100%);
+            display: flex;
+            gap: 14px;
+            line-height: 1.6;
+            font-size: 15px;
+        }
+
+        .avatar {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .avatar.user {
+            background: #5a5a5a;
+        }
+
+        .avatar.assistant {
+            background: var(--accent);
+        }
+
+        .bubble {
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding-top: 2px;
+        }
+
+        .composer-wrap {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(to top, var(--bg) 80%, rgba(33,33,33,0));
+            padding: 20px 16px 26px;
+            display: flex;
+            justify-content: center;
+        }
+
+        .composer {
+            width: min(820px, 100%);
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 52px;
+            max-height: 170px;
+            resize: none;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: var(--text);
+            font-size: 15px;
+            line-height: 1.5;
+            padding: 8px 10px;
+            font-family: inherit;
+        }
+
+        textarea::placeholder {
+            color: var(--muted);
+        }
+
+        .composer-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 2px 0;
+            gap: 10px;
+        }
+
+        .hint {
+            color: var(--muted);
+            font-size: 12px;
+            padding-left: 8px;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        button {
+            border: none;
+            outline: none;
+            border-radius: 999px;
+            padding: 9px 14px;
+            font-size: 14px;
+            cursor: pointer;
+            color: white;
+            background: var(--panel-light);
+        }
+
+        button:hover {
+            filter: brightness(1.08);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        #sendBtn {
+            background: var(--accent);
+        }
+
+        #sendBtn:hover {
+            background: var(--accent-hover);
+        }
+
+        #resetBtn {
+            background: #4a4a4a;
+        }
+
+        @media (max-width: 640px) {
+            header {
+                justify-content: flex-start;
+                padding-left: 18px;
+            }
+
+            .hint {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>EmbodiedGPT</header>
+
+    <div id="status">Ready</div>
+
+    <main id="chat">
+        <div class="message">
+            <div class="message-inner">
+                <div class="avatar assistant">E</div>
+                <div class="bubble">你好，我是 EmbodiedGPT。你可以用中文或英文告诉我：帮我拿瓶子、make an OK gesture、run all gestures、reset the hand。</div>
+            </div>
+        </div>
+    </main>
+
+    <div class="composer-wrap">
+        <div class="composer">
+            <textarea id="input" placeholder="输入一句话，按 Enter 发送，Shift + Enter 换行"></textarea>
+            <div class="composer-actions">
+                <div class="hint">Enter 发送 · Shift + Enter 换行</div>
+                <div class="buttons">
+                    <button id="resetBtn">复位</button>
+                    <button id="sendBtn">发送</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chat = document.getElementById("chat");
+        const input = document.getElementById("input");
+        const sendBtn = document.getElementById("sendBtn");
+        const resetBtn = document.getElementById("resetBtn");
+        const statusEl = document.getElementById("status");
+
+        function scrollToBottom() {
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function addMessage(role, text) {
+            const wrapper = document.createElement("div");
+            wrapper.className = "message";
+
+            const inner = document.createElement("div");
+            inner.className = "message-inner";
+
+            const avatar = document.createElement("div");
+            avatar.className = "avatar " + role;
+            avatar.textContent = role === "user" ? "U" : "E";
+
+            const bubble = document.createElement("div");
+            bubble.className = "bubble";
+            bubble.textContent = text;
+
+            inner.appendChild(avatar);
+            inner.appendChild(bubble);
+            wrapper.appendChild(inner);
+            chat.appendChild(wrapper);
+
+            scrollToBottom();
+        }
+
+        function setStatus(text) {
+            statusEl.textContent = text;
+        }
+
+        function setButtonsDisabled(disabled) {
+            sendBtn.disabled = disabled;
+            resetBtn.disabled = disabled;
+        }
+
+        async function sendMessage() {
+            const text = input.value.trim();
+            if (!text) return;
+
+            addMessage("user", text);
+            input.value = "";
+            setStatus("Thinking...");
+            setButtonsDisabled(true);
+
+            try {
+                const res = await fetch("/api/chat", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ message: text })
+                });
+
+                const data = await res.json();
+
+                addMessage("assistant", data.reply || "已处理。");
+                setStatus(data.status || "Ready");
+            } catch (err) {
+                addMessage("assistant", "执行失败：" + err.message);
+                setStatus("Error");
+            } finally {
+                setButtonsDisabled(false);
+                input.focus();
+            }
+        }
+
+        async function resetHand() {
+            addMessage("user", "复位");
+            setStatus("Resetting...");
+            setButtonsDisabled(true);
+
+            try {
+                const res = await fetch("/api/reset", {
+                    method: "POST"
+                });
+
+                const data = await res.json();
+
+                addMessage("assistant", data.reply || "已复位。");
+                setStatus(data.status || "Ready");
+            } catch (err) {
+                addMessage("assistant", "复位失败：" + err.message);
+                setStatus("Error");
+            } finally {
+                setButtonsDisabled(false);
+                input.focus();
+            }
+        }
+
+        input.addEventListener("keydown", function(e) {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        sendBtn.addEventListener("click", sendMessage);
+        resetBtn.addEventListener("click", resetHand);
+
+        scrollToBottom();
+        input.focus();
+    </script>
+</body>
+</html>
+"""
 
 
-def set_status(message):
-    status_var.set(message)
+@app.route("/")
+def index():
+    return render_template_string(HTML_PAGE)
 
 
-def execute_command(command):
-    global is_running
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    data = request.get_json(force=True)
+    message = data.get("message", "").strip()
 
-    with run_lock:
-        if is_running:
-            root.after(0, lambda: set_status("当前动作还在执行，请稍等。"))
-            return
+    if not message:
+        return jsonify({
+            "reply": "请输入一句话。",
+            "status": "Ready",
+        })
 
-        is_running = True
+    if robot_lock.locked():
+        return jsonify({
+            "reply": "当前机械手正在执行动作，请稍后再发送新的指令。",
+            "status": "Busy",
+        })
 
     try:
-        root.after(0, lambda: set_status(f"匹配命令：{COMMAND_DISPLAY_NAME[command]}"))
+        result = run_llm_control(message)
 
-        if command == "open":
-            root.after(0, lambda: set_status("正在复位：open"))
-            move_pose(POSES["open"])
-            root.after(0, lambda: set_status("已复位。"))
-
-        elif command == "gesture":
-            root.after(0, lambda: set_status("匹配到 run，3 秒后执行组合手势。"))
-            time.sleep(3)
-            gesture_sequence()
-            root.after(0, lambda: set_status("组合手势完成，当前停在 rock。"))
-
-        else:
-            root.after(0, lambda: set_status(f"3 秒后执行：{COMMAND_DISPLAY_NAME[command]}"))
-            time.sleep(3)
-            move_pose(POSES[command])
-            root.after(0, lambda: set_status(f"动作完成：{COMMAND_DISPLAY_NAME[command]}"))
+        return jsonify({
+            "reply": result["reply"],
+            "status": "Ready",
+        })
 
     except Exception as e:
-        root.after(0, lambda: messagebox.showerror("执行失败", str(e)))
-        root.after(0, lambda: set_status("执行失败。"))
-
-    finally:
-        with run_lock:
-            is_running = False
+        return jsonify({
+            "reply": f"大模型调用或执行失败：{str(e)}",
+            "status": "Error",
+        })
 
 
-def on_send():
-    text = input_text.get("1.0", "end").strip()
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    if robot_lock.locked():
+        return jsonify({
+            "reply": "当前机械手正在执行动作，请稍后再复位。",
+            "status": "Busy",
+        })
 
-    if text == "":
-        messagebox.showwarning("提示", "请输入一句话。")
-        return
+    try:
+        run_robot_command("open")
 
-    mode = control_mode_var.get()
-    if mode == "llm":
-        worker = threading.Thread(
-            target=on_send_llm_worker,
-            args=(text,),
-            daemon=True,
-        )
-        worker.start()
-        return
+        return jsonify({
+            "reply": "已复位到 open。",
+            "status": "Ready",
+        })
 
-    command, keyword = extract_command(text)
-
-    if command is None:
-        set_status("没有匹配到命令。")
-        messagebox.showinfo("未匹配", "没有找到对应动作关键词。")
-        return
-
-    matched_var.set(f"提取关键词：{keyword}    对应命令：{COMMAND_DISPLAY_NAME[command]}")
-
-    worker = threading.Thread(
-        target=execute_command,
-        args=(command,),
-        daemon=True
-    )
-    worker.start()
+    except Exception as e:
+        return jsonify({
+            "reply": f"复位失败：{str(e)}",
+            "status": "Error",
+        })
 
 
-def on_reset():
-    matched_var.set("提取关键词：复位    对应命令：open / 复位")
-
-    worker = threading.Thread(
-        target=execute_command,
-        args=("open",),
-        daemon=True
-    )
-    worker.start()
-
-
-def on_torque_on():
+@app.route("/api/torque/on", methods=["POST"])
+def api_torque_on():
     try:
         torque_on()
-        set_status("Torque On")
+        return jsonify({
+            "reply": "Torque On",
+            "status": "Ready",
+        })
     except Exception as e:
-        messagebox.showerror("Torque On failed", str(e))
+        return jsonify({
+            "reply": f"Torque On failed: {str(e)}",
+            "status": "Error",
+        })
 
 
-def on_torque_off():
+@app.route("/api/torque/off", methods=["POST"])
+def api_torque_off():
     try:
         torque_off()
-        set_status("Torque Off")
+        return jsonify({
+            "reply": "Torque Off",
+            "status": "Ready",
+        })
     except Exception as e:
-        messagebox.showerror("Torque Off failed", str(e))
+        return jsonify({
+            "reply": f"Torque Off failed: {str(e)}",
+            "status": "Error",
+        })
 
 
-def on_torque_free():
+@app.route("/api/torque/free", methods=["POST"])
+def api_torque_free():
     try:
         torque_free()
-        set_status("Torque Free")
+        return jsonify({
+            "reply": "Torque Free",
+            "status": "Ready",
+        })
     except Exception as e:
-        messagebox.showerror("Torque Free failed", str(e))
+        return jsonify({
+            "reply": f"Torque Free failed: {str(e)}",
+            "status": "Error",
+        })
 
 
 # =========================
-# UI Layout
+# Start Server
 # =========================
 
-root = tk.Tk()
-root.title("机械手自然语言控制界面")
-root.geometry("720x460")
+if __name__ == "__main__":
+    try:
+        torque_on()
+        print("Torque On")
+    except Exception as e:
+        print(f"Torque On failed: {e}")
 
-main_frame = ttk.Frame(root, padding=18)
-main_frame.pack(fill="both", expand=True)
-
-title_label = ttk.Label(
-    main_frame,
-    text="机械手自然语言控制",
-    font=("Arial", 18, "bold")
-)
-title_label.pack(pady=8)
-
-hint_label = ttk.Label(
-    main_frame,
-    text="输入一句话，例如：帮我拿瓶子 / 做一个OK手势 / 展示所有手势 / 复位",
-    font=("Arial", 10)
-)
-hint_label.pack(pady=4)
-
-mode_frame = ttk.LabelFrame(main_frame, text="解析方式", padding=8)
-mode_frame.pack(fill="x", pady=4)
-
-control_mode_var = tk.StringVar(value=DEFAULT_CONTROL_MODE)
-
-ttk.Radiobutton(
-    mode_frame,
-    text="关键词匹配（本地）",
-    variable=control_mode_var,
-    value="keyword",
-).pack(side="left", padx=12)
-
-ttk.Radiobutton(
-    mode_frame,
-    text="大模型 Tool 调用",
-    variable=control_mode_var,
-    value="llm",
-).pack(side="left", padx=12)
-
-input_frame = ttk.LabelFrame(main_frame, text="输入对话", padding=10)
-input_frame.pack(fill="both", expand=True, pady=10)
-
-input_text = tk.Text(input_frame, height=7, font=("Arial", 12))
-input_text.pack(fill="both", expand=True)
-
-matched_var = tk.StringVar(value="提取关键词：无    对应命令：无")
-matched_label = ttk.Label(
-    main_frame,
-    textvariable=matched_var,
-    font=("Arial", 11)
-)
-matched_label.pack(fill="x", pady=6)
-
-button_frame = ttk.Frame(main_frame)
-button_frame.pack(fill="x", pady=10)
-
-send_button = ttk.Button(
-    button_frame,
-    text="发送并执行",
-    command=on_send
-)
-send_button.pack(side="left", expand=True, fill="x", padx=5)
-
-reset_button = ttk.Button(
-    button_frame,
-    text="复位 Open",
-    command=on_reset
-)
-reset_button.pack(side="left", expand=True, fill="x", padx=5)
-
-torque_frame = ttk.Frame(main_frame)
-torque_frame.pack(fill="x", pady=6)
-
-ttk.Button(
-    torque_frame,
-    text="Torque On",
-    command=on_torque_on
-).pack(side="left", expand=True, fill="x", padx=5)
-
-ttk.Button(
-    torque_frame,
-    text="Torque Off",
-    command=on_torque_off
-).pack(side="left", expand=True, fill="x", padx=5)
-
-ttk.Button(
-    torque_frame,
-    text="Free",
-    command=on_torque_free
-).pack(side="left", expand=True, fill="x", padx=5)
-
-status_var = tk.StringVar(value="状态：等待输入")
-status_label = ttk.Label(
-    main_frame,
-    textvariable=status_var,
-    font=("Arial", 10)
-)
-status_label.pack(fill="x", pady=8)
-
-
-# =========================
-# Start
-# =========================
-
-try:
-    torque_on()
-    set_status("Torque On，等待输入。")
-except Exception as e:
-    set_status(f"Torque On failed: {e}")
-
-root.mainloop()
+    print("EmbodiedGPT is running at http://127.0.0.1:5000")
+    print(f"LLM model: {LLM_MODEL}")
+    app.run(host="127.0.0.1", port=5000, debug=False)
