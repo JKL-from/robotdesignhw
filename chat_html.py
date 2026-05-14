@@ -419,8 +419,8 @@ KEYWORD_RULES = [
         "command": "bottle",
         "keywords": [
             "bottle", "water bottle", "cup",
-            "pick up the bottle", "grab the bottle", "hold the bottle",
-            "瓶子", "水瓶", "杯子", "拿瓶子", "抓瓶子"
+            "pick up the bottle", "grab the bottle", "hold the bottle", "water",
+            "瓶子", "水瓶", "杯子", "拿瓶子", "抓瓶子","水"
         ],
     },
     {
